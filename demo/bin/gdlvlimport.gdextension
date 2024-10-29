@@ -32,3 +32,9 @@ ios.debug = {
 ios.release = {
     "res://bin/libgodot-cpp.ios.template_release.xcframework": ""
 }
+linux.debug.x86_64 = {
+    "res://bin/libSWBF2.so" : ""
+}
+linux.release.x86_64 = {
+    "res://bin/libSWBF2.so" : ""
+}

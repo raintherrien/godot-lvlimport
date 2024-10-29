@@ -1,6 +1,6 @@
 /demo/.godot/
 /demo/android/
 /.sconsign.dblite
-/demo/bin/libgdlvlimport.*.template_debug.*
-/demo/bin/libgdlvlimport.*.template_release.*
+/demo/bin/*.so
 /src/*.os
+/lib/*.so

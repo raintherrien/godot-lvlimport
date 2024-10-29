@@ -2,3 +2,6 @@
 	path = godot-cpp
 	url = https://github.com/godotengine/godot-cpp
 	branch = 4.3
+[submodule "lib/LibSWBF2"]
+	path = lib/LibSWBF2
+	url = https://github.com/Ben1138/LibSWBF2.git
