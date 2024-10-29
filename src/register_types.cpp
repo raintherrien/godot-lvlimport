@@ -1,5 +1,5 @@
 #include "register_types.h"
-
+#include "lvlimport.hpp"
 #include <gdextension_interface.h>
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
@@ -11,7 +11,7 @@ void initialize_lvlimport_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 
-	//GDREGISTER_CLASS(GDExample);
+	GDREGISTER_CLASS(LVLImport);
 }
 
 void uninitialize_lvlimport_module(ModuleInitializationLevel p_level) {
