@@ -1,6 +1,7 @@
 /demo/.godot/
 /demo/android/
-/.sconsign.dblite
 /demo/bin/*.so
+/demo/LibSWBF2.log
+/.sconsign.dblite
 /src/*.os
 /lib/*.so
