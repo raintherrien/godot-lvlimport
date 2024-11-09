@@ -12,7 +12,7 @@ class LVLImport : public Node {
 protected:
 	static void _bind_methods();
 public:
-	static void import_lvl(const String &lvl_filename);
+	static void import_lvl(const String &lvl_filename, const String &scene_dir);
 };
 
 }
