@@ -1,11 +1,14 @@
 #include "lvlimport.hpp"
 #include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -19,6 +22,7 @@ namespace godot {
 class WorldImporter {
 	Container *container;
 	HashMap<String, String> entity_class_scenes;
+	HashMap<String, String> images;
 
 	Node *import_world(const World &world, const String &scene_dir) {
 		String world_name = String::utf8(world.GetName().Buffer());
@@ -84,6 +88,8 @@ class WorldImporter {
 		const LibSWBF2::Terrain *terrain = world.GetTerrain();
 		if (terrain) {
 			String terrain_name = String::utf8(world.GetTerrainName().Buffer());
+
+			// Create the terrain mesh
 			MeshInstance3D *terrain_mesh = memnew(MeshInstance3D);
 			terrain_mesh->set_name(terrain_name);
 
@@ -96,55 +102,139 @@ class WorldImporter {
 			PackedVector3Array vertex;
 			PackedVector3Array normal;
 			PackedVector2Array tex_uv;
+			PackedVector2Array blend_uv;
 			PackedInt32Array index;
 
 			uint32_t index_count = 0;
 			uint32_t vertex_count = 0;
 			uint32_t tex_uv_count = 0;
-			uint32_t normal_count = 0;
 			uint32_t *index_buffer = nullptr;
 			LibSWBF2::Vector3 *vertex_buffer = nullptr;
 			LibSWBF2::Vector2 *tex_uv_buffer = nullptr;
-			LibSWBF2::Vector3 *normal_buffer = nullptr;
 
 			terrain->GetIndexBuffer(ETopology::TriangleList, index_count, index_buffer);
 			terrain->GetVertexBuffer(vertex_count, vertex_buffer);
 			terrain->GetUVBuffer(tex_uv_count, tex_uv_buffer);
-			terrain->GetNormalBuffer(normal_count, normal_buffer);
+
+			float minx = FLT_MAX;
+			float minz = FLT_MAX;
+			float maxx = FLT_MIN;
+			float maxz = FLT_MIN;
 
 			for (uint32_t i = 0; i < vertex_count; ++ i) {
 				const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
 				vertex.push_back(Vector3(zzz.m_X, zzz.m_Y, zzz.m_Z));
+				minx = MIN(minx, zzz.m_X);
+				minz = MIN(minz, zzz.m_Z);
+				maxx = MAX(maxx, zzz.m_X);
+				maxz = MAX(maxz, zzz.m_Z);
 			}
 
-			for (uint32_t i = 0; i < normal_count; ++ i) {
-				const LibSWBF2::Vector3 &zzz = normal_buffer[i];
-				normal.push_back(Vector3(zzz.m_X, zzz.m_Y, zzz.m_Z));
+			for (uint32_t i = 0; i < vertex_count; ++ i) {
+				const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
+				blend_uv.push_back(Vector2((zzz.m_X - minx) / (maxx - minx), (zzz.m_Z - minz) / (maxz - minz)));
 			}
+
 			for (uint32_t i = 0; i < tex_uv_count; ++ i) {
 				const LibSWBF2::Vector2 &zzz = tex_uv_buffer[i];
 				tex_uv.push_back(Vector2(zzz.m_X, zzz.m_Y));
 			}
 
+			// Calculate normals because what comes out of LibSWBF2 is junk
+			normal.resize(vertex_count);
+			normal.fill(Vector3());
+
+			// Yeah... If we don't do this we can't calculate normals
+			// correctly. I know it's bad, you know it's bad, let's just move on.
+			UtilityFunctions::printerr("Brute forcing terrain indices... This will take a minute");
+			if (false) // XXX
+			for (uint32_t i = 0; i < index_count; ++ i) {
+				const Vector3 &iii = vertex[index_buffer[i]];
+				for (uint32_t j = i + 1; j < index_count; ++ j) {
+					const Vector3 &jjj = vertex[index_buffer[j]];
+					if (iii.distance_squared_to(jjj) < 0.01) {
+						index_buffer[j] = index_buffer[i];
+					}
+				}
+			}
+
 			// Note the reversed index orders
 			for (uint32_t i = 0; i < index_count - 2; i += 3) {
-				index.push_back(index_buffer[i+2]);
-				index.push_back(index_buffer[i+1]);
-				index.push_back(index_buffer[i+0]);
+				int v0 = index_buffer[i+2];
+				int v1 = index_buffer[i+1];
+				int v2 = index_buffer[i+0];
+				index.push_back(v0);
+				index.push_back(v1);
+				index.push_back(v2);
+
+				Vector3 n0 = vertex[v1] - vertex[v0];
+				Vector3 n1 = vertex[v2] - vertex[v0];
+				Vector3 fn = n0.cross(n1).normalized();
+				normal[v0] -= fn;
+				normal[v1] -= fn;
+				normal[v2] -= fn;
+			}
+
+			for (uint32_t i = 0; i < vertex_count; ++ i) {
+				normal[i].normalize();
 			}
 
 			mesh_data[Mesh::ArrayType::ARRAY_VERTEX] = vertex;
 			mesh_data[Mesh::ArrayType::ARRAY_NORMAL] = normal;
 			mesh_data[Mesh::ArrayType::ARRAY_TEX_UV] = tex_uv;
+			mesh_data[Mesh::ArrayType::ARRAY_TEX_UV2] = blend_uv;
 			mesh_data[Mesh::ArrayType::ARRAY_INDEX] = index;
 
 			array_mesh->add_surface_from_arrays(Mesh::PrimitiveType::PRIMITIVE_TRIANGLES, mesh_data);
 
-			// XXX Create material
-			Ref<StandardMaterial3D> material;
-			material.instantiate();
-			// material.set_texture(...)
-			array_mesh->surface_set_material(0, material);
+			// Create the terrain material
+			Ref<ShaderMaterial> terrain_material;
+			terrain_material.instantiate();
+			terrain_material->set_shader(ResourceLoader::get_singleton()->load("res://terrain_shader.gdshader"));
+
+			// Blend Maps
+			uint32_t blend_map_dim = 0;
+			uint32_t blend_map_layers = 0; // Do we care? Right now I ignore layers
+			uint8_t *blend_map_buffer = nullptr;
+			terrain->GetBlendMap(blend_map_dim, blend_map_layers, blend_map_buffer);
+
+			for (int i = 0; i < 4; ++ i) {
+				PackedByteArray packed_buffer;
+				size_t size = blend_map_dim * blend_map_dim * sizeof(*blend_map_buffer) * 4;
+				packed_buffer.resize(size);
+				uint8_t *ptrw = packed_buffer.ptrw();
+				for (int h = 0; h < blend_map_dim; ++ h) {
+				for (int w = 0; w < blend_map_dim; ++ w) {
+					// Wtf is this indexing scheme???
+					for (int j = 0; j < 4; ++ j) {
+						if (i * 4 + j >= blend_map_layers) {
+							continue;
+						}
+						ptrw[(blend_map_dim * h + w) * 4 + j] = blend_map_buffer[blend_map_layers * (blend_map_dim * h + w) + i * 4 + j];
+					}
+				}}
+
+				Ref<Image> image = Image::create_from_data(blend_map_dim, blend_map_dim, false, Image::Format::FORMAT_RGBA8, packed_buffer);
+				image->save_png(scene_dir + String("/") + String("terrain_blend_map_") + itos(i) + String(".png"));
+				terrain_material->set_shader_parameter("BlendMap" + itos(i), ImageTexture::create_from_image(image));
+			}
+
+			// Blend Layers
+			// TODO: Can we handle bump maps, etc.?
+			const LibSWBF2::List<LibSWBF2::String> &blend_layer_texture_names = terrain->GetLayerTextures();
+			for (size_t i = 0; i < blend_layer_texture_names.Size(); ++ i) {
+				const LibSWBF2::String &texture_name_z = blend_layer_texture_names[i];
+				String texture_name = String::utf8(texture_name_z.Buffer());
+				const LibSWBF2::Texture *texture = container->FindTexture(texture_name_z);
+				if (texture) {
+					Ref<Texture2D> albedo_texture = import_texture(*texture, scene_dir);
+					terrain_material->set_shader_parameter("BlendLayer" + itos(i), albedo_texture);
+				} else {
+					UtilityFunctions::printerr("Failed to find terrain layer image ", texture_name);
+				}
+			}
+
+			array_mesh->surface_set_material(0, terrain_material);
 			terrain_mesh->set_mesh(array_mesh);
 
 			return terrain_mesh;
@@ -153,7 +243,68 @@ class WorldImporter {
 		return nullptr;
 	}
 
-	void segments_to_mesh(MeshInstance3D *mesh_instance, const LibSWBF2::List<Segment> &segments) {
+	Ref<Image> maybe_load_image(const String &image_name) {
+		if (images.has(image_name)) {
+			String image_path = images.get(image_name);
+			Ref<Image> image;
+			image.instantiate();
+			Error e = image->load(image_path);
+			if (e == Error::OK) {
+				return image;
+			} else {
+				UtilityFunctions::printerr("Failed to import image ", image_name);
+			}
+		}
+		return Ref<Image>{};
+	}
+
+	Ref<Texture2D> import_texture(const LibSWBF2::Texture &texture, const String &scene_dir) {
+		String texture_name = String::utf8(texture.GetName().Buffer());
+
+		String image_path = scene_dir + String("/") + String(texture_name) + String(".png");
+
+		Ref<Image> image = maybe_load_image(texture_name);
+		if (!image.is_valid()) {
+			UtilityFunctions::printerr("Importing texture ", texture_name);
+
+			uint16_t width = 0;
+			uint16_t height = 0;
+			const uint8_t *buffer = nullptr;
+			texture.GetImageData(ETextureFormat::R8_G8_B8_A8, 0, width, height, buffer);
+
+			PackedByteArray packed_buffer;
+			size_t size = width * height * sizeof(*buffer) * 4;
+			packed_buffer.resize(size);
+			memcpy(packed_buffer.ptrw(), buffer, size);
+
+			image = Image::create_from_data(width, height, false, Image::Format::FORMAT_RGBA8, packed_buffer);
+			Error e = image->save_png(image_path);
+			if (e == Error::OK) {
+				images.insert(texture_name, image_path);
+			} else {
+				UtilityFunctions::printerr("Failed to save ", texture_name, " as ", image_path);
+			}
+		}
+
+		return ImageTexture::create_from_image(image);
+	}
+
+	Ref<StandardMaterial3D> import_material(const LibSWBF2::Material &material, const String &scene_dir) {
+		Ref<StandardMaterial3D> standard_material;
+		standard_material.instantiate();
+
+		// TODO: Material flags
+
+		const LibSWBF2::Texture *texture = material.GetTexture(0); // XXX: Other than albedo?
+		if (texture) {
+			Ref<Texture2D> albedo_texture = import_texture(*texture, scene_dir);
+			standard_material->set_texture(BaseMaterial3D::TextureParam::TEXTURE_ALBEDO, albedo_texture);
+		}
+
+		return standard_material;
+	}
+
+	void segments_to_mesh(MeshInstance3D *mesh_instance, const LibSWBF2::List<Segment> &segments, const String &override_texture, const String &scene_dir) {
 		Ref<ArrayMesh> array_mesh;
 		array_mesh.instantiate();
 
@@ -186,14 +337,6 @@ class WorldImporter {
 
 			ETopology topology = segment.GetTopology();
 
-			if (topology == ETopology::PointList ||
-			    topology == ETopology::LineList ||
-			    topology == ETopology::LineStrip)
-			{
-				UtilityFunctions::printerr("Skipping mesh segment with unsupported topology");
-				continue;
-			}
-
 			if (vertex_count != normal_count || normal_count != tex_uv_count) {
 				UtilityFunctions::printerr("Skipping mesh with invalid vertex, normal, tex_uv count: ", vertex_count, " ", normal_count, " ", tex_uv_count);
 				continue;
@@ -213,13 +356,17 @@ class WorldImporter {
 				tex_uv.push_back(Vector2(zzz.m_X, zzz.m_Y));
 			}
 
-			if (topology == ETopology::TriangleList) {
+			if (topology == ETopology::PointList ||
+			    topology == ETopology::LineList ||
+			    topology == ETopology::LineStrip)
+			{
+				UtilityFunctions::printerr("Skipping mesh segment with unsupported topology");
+				continue;
+			} else if (topology == ETopology::TriangleList) {
 				for (uint32_t i = 0; i < index_count; ++ i) {
 					index.push_back(index_buffer[i]);
 				}
-			}
-
-			if (topology == ETopology::TriangleStrip) {
+			} else if (topology == ETopology::TriangleStrip) {
 				// Convert strip to list
 				for (uint32_t i = 0; i < index_count - 2; ++ i) {
 					if (i % 2 == 1) {
@@ -232,9 +379,7 @@ class WorldImporter {
 						index.push_back(index_buffer[i+1]);
 					}
 				}
-			}
-
-			if (topology == ETopology::TriangleFan) {
+			} else if (topology == ETopology::TriangleFan) {
 				if (index_count < 3) {
 					UtilityFunctions::printerr("Skipping mesh segment triangle fan with only ", index_count, " indices");
 				}
@@ -245,9 +390,9 @@ class WorldImporter {
 					index.push_back(index_buffer[i+0]);
 					index.push_back(index_buffer[i+1]);
 				}
+			} else {
+				UtilityFunctions::printerr("Skipping mesh segment with unknown topology ", (int32_t)topology);
 			}
-
-			UtilityFunctions::printerr("Skipping mesh segment with unknown topology ", (int32_t)topology);
 
 			mesh_data[Mesh::ArrayType::ARRAY_VERTEX] = vertex;
 			mesh_data[Mesh::ArrayType::ARRAY_NORMAL] = normal;
@@ -256,11 +401,7 @@ class WorldImporter {
 
 			array_mesh->add_surface_from_arrays(Mesh::PrimitiveType::PRIMITIVE_TRIANGLES, mesh_data);
 
-			// XXX Create material
-			Ref<StandardMaterial3D> material;
-			material.instantiate();
-			// material.set_texture(...)
-			array_mesh->surface_set_material(surface_index, material);
+			array_mesh->surface_set_material(surface_index, import_material(segment.GetMaterial(), scene_dir));
 
 			surface_index += 1;
 		}
@@ -344,7 +485,8 @@ class WorldImporter {
 			MeshInstance3D *mesh = memnew(MeshInstance3D);
 			String mesh_name = String(model_name) + String("_") + bone_name + String("_") + "mesh";
 			mesh->set_name(mesh_name);
-			segments_to_mesh(mesh, segments);
+			// TODO: LVLImport only applies override_texture to skinned meshes (bone_name == ""). Why?
+			segments_to_mesh(mesh, segments, override_texture, scene_dir);
 
 			// Parent our mesh to the bone node
 			Node *bone_node = root->find_child(bone_name, true, true);
