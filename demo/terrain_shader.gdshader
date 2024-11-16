@@ -50,4 +50,7 @@ void fragment() {
 	         l4 * b1.r + l5 * b1.g + l6 * b1.b + l7 * b1.a +
 	         l8 * b2.r + l9 * b2.g + l10 * b2.b + l11 * b2.a +
 	         l12 * b3.r + l13 * b3.g + l14 * b3.b + l15 * b3.a;
+
+	SPECULAR = 0.0f;
+	METALLIC = 0.0f;
 }

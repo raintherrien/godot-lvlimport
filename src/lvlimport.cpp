@@ -26,7 +26,7 @@ class WorldImporter {
 
 	Node *import_world(const World &world, const String &scene_dir) {
 		String world_name = String::utf8(world.GetName().Buffer());
-		UtilityFunctions::print("Importing world ", world_name);
+		printdebug("Importing world ", world_name);
 
 		Node *world_root = memnew(Node);
 		if (world_root == nullptr) {
@@ -40,10 +40,10 @@ class WorldImporter {
 		for (size_t i = 0; i < instances.Size(); ++ i) {
 			String instance_name = String::utf8(instances[i].GetName().Buffer());
 			String entity_class_name = String::utf8(instances[i].GetEntityClassName().Buffer());
-			UtilityFunctions::print("Importing instance ", i, "/", instances.Size(), " ", instance_name);
+			printdebug("Importing instance ", i, "/", instances.Size(), " ", instance_name);
 			Node3D *instance = import_entity_class(entity_class_name, scene_dir);
 			if (instance) {
-				UtilityFunctions::print("Attaching ", instance_name, " to world");
+				printdebug("Attaching ", instance_name, " to world");
 				instance->set_name(instance_name);
 				LibSWBF2::Vector3 pz = instances[i].GetPosition();
 				LibSWBF2::Vector4 rz = instances[i].GetRotation();
@@ -220,7 +220,7 @@ class WorldImporter {
 			}
 
 			// Blend Layers
-			// TODO: Can we handle bump maps, etc.?
+			// TODO: Does SWBF2 have terrain bump mapping?
 			const LibSWBF2::List<LibSWBF2::String> &blend_layer_texture_names = terrain->GetLayerTextures();
 			for (size_t i = 0; i < blend_layer_texture_names.Size(); ++ i) {
 				const LibSWBF2::String &texture_name_z = blend_layer_texture_names[i];
@@ -265,7 +265,7 @@ class WorldImporter {
 
 		Ref<Image> image = maybe_load_image(texture_name);
 		if (!image.is_valid()) {
-			UtilityFunctions::printerr("Importing texture ", texture_name);
+			printdebug("Importing texture ", texture_name);
 
 			uint16_t width = 0;
 			uint16_t height = 0;
@@ -293,13 +293,34 @@ class WorldImporter {
 		Ref<StandardMaterial3D> standard_material;
 		standard_material.instantiate();
 
-		// TODO: Material flags
-
-		const LibSWBF2::Texture *texture = material.GetTexture(0); // XXX: Other than albedo?
-		if (texture) {
+		// All material types have an albedo texture
+		if (const LibSWBF2::Texture *texture = material.GetTexture(0)) {
 			Ref<Texture2D> albedo_texture = import_texture(*texture, scene_dir);
 			standard_material->set_texture(BaseMaterial3D::TextureParam::TEXTURE_ALBEDO, albedo_texture);
+		} else {
+			UtilityFunctions::printerr("Failed to get albedo map texture for material");
 		}
+
+		// TODO: Other textures? Specular?
+		// I'm assuming this matches the order of textures used by XSI as documented here:
+		// https://sites.google.com/site/swbf2modtoolsdocumentation/misc_documentation
+		EMaterialFlags material_flags = material.GetFlags();
+		//if ((uint32_t)material_flags & (uint32_t)EMaterialFlags::BumpMap) {
+			if (const LibSWBF2::Texture *texture = material.GetTexture(1)) {
+				Ref<Texture2D> normal_texture = import_texture(*texture, scene_dir);
+				standard_material->set_texture(BaseMaterial3D::TextureParam::TEXTURE_NORMAL, normal_texture);
+			} else if ((uint32_t)material_flags & (uint32_t)EMaterialFlags::BumpMap) {
+				UtilityFunctions::printerr("Failed to get normal map texture for material");
+			}
+		//}
+
+		if ((uint32_t)material_flags & (uint32_t)EMaterialFlags::Transparent) {
+			standard_material->set_transparency(BaseMaterial3D::Transparency::TRANSPARENCY_ALPHA);
+		}
+
+		// This is pretty basic...
+		standard_material->set_specular(0);
+		standard_material->set_metallic(0);
 
 		return standard_material;
 	}
@@ -410,7 +431,7 @@ class WorldImporter {
 	}
 
 	void populate_model(Node3D *root, const String &model_name, const String &override_texture, const String &scene_dir) {
-		UtilityFunctions::print("Populating model ", model_name);
+		printdebug("Populating model ", model_name);
 
 		// Load the SWBF2 Model representation
 		const Model *model = container->FindModel(model_name.utf8().get_data());
@@ -491,7 +512,7 @@ class WorldImporter {
 			// Parent our mesh to the bone node
 			Node *bone_node = root->find_child(bone_name, true, true);
 			if (bone_node) {
-				UtilityFunctions::printerr("Attaching mesh ", mesh_name, " to ", bone_name);
+				printdebug("Attaching mesh ", mesh_name, " to ", bone_name);
 				make_parent_and_owner(bone_node, mesh);
 			} else {
 				make_parent_and_owner(root, mesh);
@@ -503,7 +524,7 @@ class WorldImporter {
 	}
 
 	Node3D *import_entity_class(const String &entity_class_name, const String &scene_dir) {
-		UtilityFunctions::print("Importing EntityClass ", entity_class_name);
+		printdebug("Importing EntityClass ", entity_class_name);
 
 		// If we've already loaded this entity class, return an instantiation
 		if (Node3D *instance = maybe_instantiate_entity_class(entity_class_name)) {
@@ -539,7 +560,7 @@ class WorldImporter {
 		}
 
 		// Perform the actual scene creation
-		UtilityFunctions::print("Creating entity class ", entity_class_name, " scene");
+		printdebug("Creating entity class ", entity_class_name, " scene");
 		LibSWBF2::List<LibSWBF2::String> property_values;
 		LibSWBF2::List<uint32_t> property_hashes;
 		entity_class->GetAllProperties(property_hashes, property_values);
@@ -556,7 +577,7 @@ class WorldImporter {
 			String property_value = String::utf8(property_values[pi].Buffer());
 			switch (property_hash) {
 				case 1204317002: { // GeometryName
-					UtilityFunctions::print("Attaching model ", property_value, " to ", entity_class_name);
+					printdebug("Attaching model ", property_value, " to ", entity_class_name);
 					// Determine our texture, which is a separate property
 					String override_texture = "";
 					for (size_t i = 0; i < property_hashes.Size(); ++ i) {
@@ -573,7 +594,7 @@ class WorldImporter {
 					break;
 				case 1005041674: // AttachToHardpoint
 					if (next_attach_entity_class.length() > 0) {
-						UtilityFunctions::print("Attaching ", next_attach_entity_class, " to hardpoint ", property_value);
+						printdebug("Attaching ", next_attach_entity_class, " to hardpoint ", property_value);
 						// Find the child we are attaching to. Default to the root
 						Node *attach_to = root;
 						if (Node *attach_to_child = root->find_child(property_value, true, true)) {
@@ -592,7 +613,7 @@ class WorldImporter {
 					break;
 				case 2555738718: // AnimationName
 				case 3779456605: // Animation
-					UtilityFunctions::print("Skipping animation ", property_value);
+					printdebug("Skipping animation ", property_value);
 					break;
 				case 1576910975: // SoldierCollision
 				case 4213956359: // OrdnanceCollision
@@ -602,7 +623,7 @@ class WorldImporter {
 					// Silently ignore, only relevant in GeometryName
 					break;
 				default:
-					UtilityFunctions::print("Skipping unknown property ", property_hash, " (hash) = ", property_value);
+					UtilityFunctions::printerr("Skipping unknown property ", property_hash, " (hash) = ", property_value);
 					break;
 			}
 		}
@@ -647,7 +668,7 @@ class WorldImporter {
 	}
 
 	static Error save_as_scene(Node *node, String scene_path) {
-		UtilityFunctions::print("Saving packed scene ", scene_path);
+		printdebug("Saving packed scene ", scene_path);
 		Ref<PackedScene> scene;
 		scene.instantiate();
 		Error pack_err = scene->pack(node);
@@ -662,19 +683,24 @@ class WorldImporter {
 		return Error::OK;
 	}
 
+	template <typename... Args> static void printdebug(const Variant &p_arg1, Args&&... p_args) {
+		if (false)
+			UtilityFunctions::print(p_arg1, std::forward<Args>(p_args)...);
+	}
+
 public:
 	WorldImporter() {
-		UtilityFunctions::print("Creating WorldImporter");
+		printdebug("Creating WorldImporter");
 		container = Container::Create();
 	}
 
 	~WorldImporter() {
-		UtilityFunctions::print("Destroying WorldImporter");
+		printdebug("Destroying WorldImporter");
 		Container::Delete(container);
 	}
 
 	void import_lvl(const String &lvl_filename, const String &scene_dir) {
-		UtilityFunctions::print("Importing ", lvl_filename);
+		printdebug("Importing ", lvl_filename);
 		const char *lvl_filename_cstr = lvl_filename.utf8().get_data();
 
 		// Create our container and load our lvl file
@@ -689,7 +715,7 @@ public:
 		do {
 			OS::get_singleton()->delay_msec(1000);
 			++ waited;
-			UtilityFunctions::print("Waited ", waited, "s for levels to load");
+			printdebug("Waited ", waited, "s for levels to load");
 			if (waited >= 60) {
 				UtilityFunctions::printerr("Canceling import because ", lvl_filename_cstr, " took longer than 60s to load");
 				return;
@@ -703,7 +729,7 @@ public:
 				UtilityFunctions::printerr("Failed to load level");
 				return;
 			}
-			UtilityFunctions::print("Importing level ", String::utf8(level->GetLevelName().Buffer()));
+			printdebug("Importing level ", String::utf8(level->GetLevelName().Buffer()));
 			if (!level->IsWorldLevel()) {
 				UtilityFunctions::printerr("Canceling import because ", lvl_filename_cstr, " is not a world level");
 				return;
@@ -711,7 +737,7 @@ public:
 
 			// Ensure our scene_dir exists
 			if(!DirAccess::dir_exists_absolute(scene_dir)) {
-				UtilityFunctions::print("Creating scene directory ", scene_dir);
+				printdebug("Creating scene directory ", scene_dir);
 				if (Error e = DirAccess::make_dir_absolute(scene_dir)) {
 					UtilityFunctions::printerr("Could not create scene directory ", scene_dir);
 					return;
@@ -730,13 +756,13 @@ public:
 				Node *world_node = import_world(world, scene_dir);
 				if (world_node) {
 					make_parent_and_owner(lvl_root, world_node);
-					UtilityFunctions::print("Adding world to lvl scene");
+					printdebug("Adding world to lvl scene");
 				} else {
 					UtilityFunctions::printerr("World ", String::utf8(world.GetName().Buffer()), " failed to import");
 				}
 			}
 			if (save_as_scene(lvl_root, scene_dir + String("/") + lvl_root->get_name() + String(".tscn")) == Error::OK) {
-				UtilityFunctions::print("Import successful");
+				printdebug("Import successful");
 			}
 			memdelete(lvl_root);
 		}
