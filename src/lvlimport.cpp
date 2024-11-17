@@ -67,7 +67,10 @@ class WorldImporter {
 		}
 
 
-		// XXX: Import skydome
+		// Import skydome
+		if (Node *skydome = import_skydome(world, scene_dir)) {
+			make_parent_and_owner(world_root, skydome);
+		}
 
 		return world_root;
 	}
@@ -90,168 +93,213 @@ class WorldImporter {
 		return nullptr;
 	}
 
-	MeshInstance3D *import_terrain(const World &world, const String &scene_dir) {
-		const LibSWBF2::Terrain *terrain = world.GetTerrain();
-		if (terrain) {
-			String terrain_name = String::utf8(world.GetTerrainName().Buffer());
-
-			// Create the terrain mesh
-			MeshInstance3D *terrain_mesh = memnew(MeshInstance3D);
-			terrain_mesh->set_name(terrain_name);
-
-			Ref<ArrayMesh> array_mesh;
-			array_mesh.instantiate();
-
-			Array mesh_data;
-			mesh_data.resize(Mesh::ArrayType::ARRAY_MAX);
-
-			PackedVector3Array vertex;
-			PackedVector3Array normal;
-			PackedVector2Array tex_uv;
-			PackedVector2Array blend_uv;
-			PackedInt32Array index;
-
-			uint32_t index_count = 0;
-			uint32_t vertex_count = 0;
-			uint32_t tex_uv_count = 0;
-			uint32_t *index_buffer = nullptr;
-			LibSWBF2::Vector3 *vertex_buffer = nullptr;
-			LibSWBF2::Vector2 *tex_uv_buffer = nullptr;
-
-			terrain->GetIndexBuffer(ETopology::TriangleList, index_count, index_buffer);
-			terrain->GetVertexBuffer(vertex_count, vertex_buffer);
-			terrain->GetUVBuffer(tex_uv_count, tex_uv_buffer);
-
-			float minx = FLT_MAX;
-			float minz = FLT_MAX;
-			float maxx = FLT_MIN;
-			float maxz = FLT_MIN;
-
-			for (uint32_t i = 0; i < vertex_count; ++ i) {
-				const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
-				vertex.push_back(Vector3(zzz.m_X, zzz.m_Y, zzz.m_Z));
-				minx = MIN(minx, zzz.m_X);
-				minz = MIN(minz, zzz.m_Z);
-				maxx = MAX(maxx, zzz.m_X);
-				maxz = MAX(maxz, zzz.m_Z);
-			}
-
-			for (uint32_t i = 0; i < vertex_count; ++ i) {
-				const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
-				blend_uv.push_back(Vector2((zzz.m_X - minx) / (maxx - minx), (zzz.m_Z - minz) / (maxz - minz)));
-			}
-
-			for (uint32_t i = 0; i < tex_uv_count; ++ i) {
-				const LibSWBF2::Vector2 &zzz = tex_uv_buffer[i];
-				tex_uv.push_back(Vector2(zzz.m_X, zzz.m_Y));
-			}
-
-			// Calculate normals because what comes out of LibSWBF2 is junk
-			normal.resize(vertex_count);
-			normal.fill(Vector3());
-
-			// Yeah... If we don't do this we can't calculate normals
-			// correctly. I know it's bad, you know it's bad, let's just move on.
-			printdebug("Brute forcing terrain indices... This will take a minute");
-			PackedByteArray visited;
-			visited.resize(index_count);
-			visited.fill(0);
-			for (uint32_t i = 0; i < index_count; ++ i) {
-				const Vector3 &iii = vertex[index_buffer[i]];
-				if (visited[i] == 0) {
-					for (uint32_t j = i + 1; j < index_count; ++ j) {
-						const Vector3 &jjj = vertex[index_buffer[j]];
-						if (iii.distance_squared_to(jjj) < 0.01) {
-							index_buffer[j] = index_buffer[i];
-							visited[j] = 1;
-						}
-					}
-				}
-			}
-
-			// Note the reversed index orders
-			for (uint32_t i = 0; i < index_count - 2; i += 3) {
-				int v0 = index_buffer[i+2];
-				int v1 = index_buffer[i+1];
-				int v2 = index_buffer[i+0];
-				index.push_back(v0);
-				index.push_back(v1);
-				index.push_back(v2);
-
-				Vector3 n0 = vertex[v1] - vertex[v0];
-				Vector3 n1 = vertex[v2] - vertex[v0];
-				Vector3 fn = n0.cross(n1).normalized();
-				normal[v0] -= fn;
-				normal[v1] -= fn;
-				normal[v2] -= fn;
-			}
-
-			for (uint32_t i = 0; i < vertex_count; ++ i) {
-				normal[i].normalize();
-			}
-
-			mesh_data[Mesh::ArrayType::ARRAY_VERTEX] = vertex;
-			mesh_data[Mesh::ArrayType::ARRAY_NORMAL] = normal;
-			mesh_data[Mesh::ArrayType::ARRAY_TEX_UV] = tex_uv;
-			mesh_data[Mesh::ArrayType::ARRAY_TEX_UV2] = blend_uv;
-			mesh_data[Mesh::ArrayType::ARRAY_INDEX] = index;
-
-			array_mesh->add_surface_from_arrays(Mesh::PrimitiveType::PRIMITIVE_TRIANGLES, mesh_data);
-
-			// Create the terrain material
-			Ref<ShaderMaterial> terrain_material;
-			terrain_material.instantiate();
-			terrain_material->set_shader(ResourceLoader::get_singleton()->load("res://terrain_shader.gdshader"));
-
-			// Blend Maps
-			uint32_t blend_map_dim = 0;
-			uint32_t blend_map_layers = 0; // Do we care? Right now I ignore layers
-			uint8_t *blend_map_buffer = nullptr;
-			terrain->GetBlendMap(blend_map_dim, blend_map_layers, blend_map_buffer);
-
-			for (int i = 0; i < 4; ++ i) {
-				PackedByteArray packed_buffer;
-				size_t size = blend_map_dim * blend_map_dim * sizeof(*blend_map_buffer) * 4;
-				packed_buffer.resize(size);
-				uint8_t *ptrw = packed_buffer.ptrw();
-				for (int h = 0; h < blend_map_dim; ++ h) {
-				for (int w = 0; w < blend_map_dim; ++ w) {
-					// Wtf is this indexing scheme???
-					for (int j = 0; j < 4; ++ j) {
-						if (i * 4 + j >= blend_map_layers) {
-							continue;
-						}
-						ptrw[(blend_map_dim * h + w) * 4 + j] = blend_map_buffer[blend_map_layers * (blend_map_dim * h + w) + i * 4 + j];
-					}
-				}}
-
-				Ref<Image> image = Image::create_from_data(blend_map_dim, blend_map_dim, false, Image::Format::FORMAT_RGBA8, packed_buffer);
-				image->save_png(scene_dir + String("/") + String("terrain_blend_map_") + itos(i) + String(".png"));
-				terrain_material->set_shader_parameter("BlendMap" + itos(i), ImageTexture::create_from_image(image));
-			}
-
-			// Blend Layers
-			// TODO: Does SWBF2 have terrain bump mapping?
-			const LibSWBF2::List<LibSWBF2::String> &blend_layer_texture_names = terrain->GetLayerTextures();
-			for (size_t i = 0; i < blend_layer_texture_names.Size(); ++ i) {
-				const LibSWBF2::String &texture_name_z = blend_layer_texture_names[i];
-				String texture_name = String::utf8(texture_name_z.Buffer());
-				const LibSWBF2::Texture *texture = container->FindTexture(texture_name_z);
-				if (texture) {
-					Ref<Texture2D> albedo_texture = import_texture(*texture, scene_dir);
-					terrain_material->set_shader_parameter("BlendLayer" + itos(i), albedo_texture);
-				} else {
-					UtilityFunctions::printerr("Failed to find terrain layer image ", texture_name);
-				}
-			}
-
-			array_mesh->surface_set_material(0, terrain_material);
-			terrain_mesh->set_mesh(array_mesh);
-
-			return terrain_mesh;
+	Node3D *import_skydome(const World &world, const String &scene_dir) {
+		printdebug("Importing skydome");
+		const LibSWBF2::Config *skydome_config = container->FindConfig(EConfigType::Skydome, FNV::Hash(world.GetSkyName()));
+		if (skydome_config == nullptr) {
+			return nullptr;
 		}
 
-		return nullptr;
+		Node3D *skydome = memnew(Node3D);
+		if (skydome == nullptr) {
+			UtilityFunctions::printerr("Failed to create skydome node");
+			return nullptr;
+		}
+		skydome->set_name("skydome");
+		skydome->set_scale(Vector3(300, 300, 300));
+
+		// TODO: This LibSWBF2 code may throw an exception! But Godot does not compile with exceptions!
+		const LibSWBF2::Field &dome_info = skydome_config->GetField(FNV::Hash("DomeInfo"));
+		LibSWBF2::List<const LibSWBF2::Field *> dome_models = dome_info.m_Scope.GetFields(FNV::Hash("DomeModel"));
+		printdebug("Skydome has ", dome_models.Size(), " dome models");
+		for (size_t i = 0; i < dome_models.Size(); ++ i) {
+			String model_name = String::utf8(dome_models[i]->m_Scope.GetField(FNV::Hash("Geometry")).GetString().Buffer());
+			// This alternate behavior mimicks that of the .NET Scope wrapper from LibSWBF2 definition of GetString
+			if (model_name == "") {
+				model_name = String::utf8(dome_models[i]->GetString(FNV::Hash("Geometry")).Buffer());
+			}
+			printdebug("Importing skydome model ", i, "/",  dome_models.Size(), " ", model_name);
+			populate_model(skydome, model_name, "", scene_dir);
+		}
+
+		// Create sky objects
+		LibSWBF2::List<const LibSWBF2::Field *> sky_objects = skydome_config->GetFields(FNV::Hash("SkyObject"));
+		printdebug("Skydome has ", sky_objects.Size(), " sky objects");
+		for (size_t i = 0; i < sky_objects.Size(); ++ i) {
+			String model_name = String::utf8(sky_objects[i]->m_Scope.GetField(FNV::Hash("Geometry")).GetString().Buffer());
+			// This alternate behavior mimicks that of the .NET Scope wrapper from LibSWBF2 definition of GetString
+			if (model_name == "") {
+				model_name = String::utf8(sky_objects[i]->GetString(FNV::Hash("Geometry")).Buffer());
+			}
+			printdebug("Importing sky object ", i, "/",  sky_objects.Size(), " ", model_name);
+			populate_model(skydome, model_name, "", scene_dir);
+		}
+
+		return skydome;
+	}
+
+	MeshInstance3D *import_terrain(const World &world, const String &scene_dir) {
+		const LibSWBF2::Terrain *terrain = world.GetTerrain();
+		if (terrain == nullptr) {
+			return nullptr;
+		}
+
+		String terrain_name = String::utf8(world.GetTerrainName().Buffer());
+
+		// Create the terrain mesh
+		MeshInstance3D *terrain_mesh = memnew(MeshInstance3D);
+		terrain_mesh->set_name(terrain_name);
+
+		Ref<ArrayMesh> array_mesh;
+		array_mesh.instantiate();
+
+		Array mesh_data;
+		mesh_data.resize(Mesh::ArrayType::ARRAY_MAX);
+
+		PackedVector3Array vertex;
+		PackedVector3Array normal;
+		PackedVector2Array tex_uv;
+		PackedVector2Array blend_uv;
+		PackedInt32Array index;
+
+		uint32_t index_count = 0;
+		uint32_t vertex_count = 0;
+		uint32_t tex_uv_count = 0;
+		uint32_t *index_buffer = nullptr;
+		LibSWBF2::Vector3 *vertex_buffer = nullptr;
+		LibSWBF2::Vector2 *tex_uv_buffer = nullptr;
+
+		terrain->GetIndexBuffer(ETopology::TriangleList, index_count, index_buffer);
+		terrain->GetVertexBuffer(vertex_count, vertex_buffer);
+		terrain->GetUVBuffer(tex_uv_count, tex_uv_buffer);
+
+		float minx = FLT_MAX;
+		float minz = FLT_MAX;
+		float maxx = FLT_MIN;
+		float maxz = FLT_MIN;
+
+		for (uint32_t i = 0; i < vertex_count; ++ i) {
+			const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
+			vertex.push_back(Vector3(zzz.m_X, zzz.m_Y, zzz.m_Z));
+			minx = MIN(minx, zzz.m_X);
+			minz = MIN(minz, zzz.m_Z);
+			maxx = MAX(maxx, zzz.m_X);
+			maxz = MAX(maxz, zzz.m_Z);
+		}
+
+		for (uint32_t i = 0; i < vertex_count; ++ i) {
+			const LibSWBF2::Vector3 &zzz = vertex_buffer[i];
+			blend_uv.push_back(Vector2((zzz.m_X - minx) / (maxx - minx), (zzz.m_Z - minz) / (maxz - minz)));
+		}
+
+		for (uint32_t i = 0; i < tex_uv_count; ++ i) {
+			const LibSWBF2::Vector2 &zzz = tex_uv_buffer[i];
+			tex_uv.push_back(Vector2(zzz.m_X, zzz.m_Y));
+		}
+
+		// Calculate normals because what comes out of LibSWBF2 is junk
+		normal.resize(vertex_count);
+		normal.fill(Vector3());
+
+		// Yeah... If we don't do this we can't calculate normals
+		// correctly. I know it's bad, you know it's bad, let's just move on.
+		printdebug("Brute forcing terrain indices... This will take a minute");
+		PackedByteArray visited;
+		visited.resize(index_count);
+		visited.fill(0);
+		for (uint32_t i = 0; i < index_count; ++ i) {
+			const Vector3 &iii = vertex[index_buffer[i]];
+			if (visited[i] == 0) {
+				for (uint32_t j = i + 1; j < index_count; ++ j) {
+					const Vector3 &jjj = vertex[index_buffer[j]];
+					if (iii.distance_squared_to(jjj) < 0.01) {
+						index_buffer[j] = index_buffer[i];
+						visited[j] = 1;
+					}
+				}
+			}
+		}
+
+		// Note the reversed index orders
+		for (uint32_t i = 0; i < index_count - 2; i += 3) {
+			int v0 = index_buffer[i+2];
+			int v1 = index_buffer[i+1];
+			int v2 = index_buffer[i+0];
+			index.push_back(v0);
+			index.push_back(v1);
+			index.push_back(v2);
+
+			Vector3 n0 = vertex[v1] - vertex[v0];
+			Vector3 n1 = vertex[v2] - vertex[v0];
+			Vector3 fn = n0.cross(n1).normalized();
+			normal[v0] -= fn;
+			normal[v1] -= fn;
+			normal[v2] -= fn;
+		}
+
+		for (uint32_t i = 0; i < vertex_count; ++ i) {
+			normal[i].normalize();
+		}
+
+		mesh_data[Mesh::ArrayType::ARRAY_VERTEX] = vertex;
+		mesh_data[Mesh::ArrayType::ARRAY_NORMAL] = normal;
+		mesh_data[Mesh::ArrayType::ARRAY_TEX_UV] = tex_uv;
+		mesh_data[Mesh::ArrayType::ARRAY_TEX_UV2] = blend_uv;
+		mesh_data[Mesh::ArrayType::ARRAY_INDEX] = index;
+
+		array_mesh->add_surface_from_arrays(Mesh::PrimitiveType::PRIMITIVE_TRIANGLES, mesh_data);
+
+		// Create the terrain material
+		Ref<ShaderMaterial> terrain_material;
+		terrain_material.instantiate();
+		terrain_material->set_shader(ResourceLoader::get_singleton()->load("res://terrain_shader.gdshader"));
+
+		// Blend Maps
+		uint32_t blend_map_dim = 0;
+		uint32_t blend_map_layers = 0; // Do we care? Right now I ignore layers
+		uint8_t *blend_map_buffer = nullptr;
+		terrain->GetBlendMap(blend_map_dim, blend_map_layers, blend_map_buffer);
+
+		for (int i = 0; i < 4; ++ i) {
+			PackedByteArray packed_buffer;
+			size_t size = blend_map_dim * blend_map_dim * sizeof(*blend_map_buffer) * 4;
+			packed_buffer.resize(size);
+			uint8_t *ptrw = packed_buffer.ptrw();
+			for (int h = 0; h < blend_map_dim; ++ h) {
+			for (int w = 0; w < blend_map_dim; ++ w) {
+				// Wtf is this indexing scheme???
+				for (int j = 0; j < 4; ++ j) {
+					if (i * 4 + j >= blend_map_layers) {
+						continue;
+					}
+					ptrw[(blend_map_dim * h + w) * 4 + j] = blend_map_buffer[blend_map_layers * (blend_map_dim * h + w) + i * 4 + j];
+				}
+			}}
+
+			Ref<Image> image = Image::create_from_data(blend_map_dim, blend_map_dim, false, Image::Format::FORMAT_RGBA8, packed_buffer);
+			image->save_png(scene_dir + String("/") + String("terrain_blend_map_") + itos(i) + String(".png"));
+			terrain_material->set_shader_parameter("BlendMap" + itos(i), ImageTexture::create_from_image(image));
+		}
+
+		// Blend Layers
+		// TODO: Does SWBF2 have terrain bump mapping?
+		const LibSWBF2::List<LibSWBF2::String> &blend_layer_texture_names = terrain->GetLayerTextures();
+		for (size_t i = 0; i < blend_layer_texture_names.Size(); ++ i) {
+			const LibSWBF2::String &texture_name_z = blend_layer_texture_names[i];
+			String texture_name = String::utf8(texture_name_z.Buffer());
+			const LibSWBF2::Texture *texture = container->FindTexture(texture_name_z);
+			if (texture) {
+				Ref<Texture2D> albedo_texture = import_texture(*texture, scene_dir);
+				terrain_material->set_shader_parameter("BlendLayer" + itos(i), albedo_texture);
+			} else {
+				UtilityFunctions::printerr("Failed to find terrain layer image ", texture_name);
+			}
+		}
+
+		array_mesh->surface_set_material(0, terrain_material);
+		terrain_mesh->set_mesh(array_mesh);
+
+		return terrain_mesh;
 	}
 
 	Ref<Image> maybe_load_image(const String &image_name) {
