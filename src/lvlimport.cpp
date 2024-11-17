@@ -1,4 +1,8 @@
 #include "lvlimport.hpp"
+#include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/classes/concave_polygon_shape3d.hpp>
+#include <godot_cpp/classes/cylinder_shape3d.hpp>
+#include <godot_cpp/classes/box_shape3d.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
@@ -9,7 +13,9 @@
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/sphere_shape3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/static_body3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
@@ -146,14 +152,19 @@ class WorldImporter {
 
 			// Yeah... If we don't do this we can't calculate normals
 			// correctly. I know it's bad, you know it's bad, let's just move on.
-			UtilityFunctions::printerr("Brute forcing terrain indices... This will take a minute");
-			if (false) // XXX
+			printdebug("Brute forcing terrain indices... This will take a minute");
+			PackedByteArray visited;
+			visited.resize(index_count);
+			visited.fill(0);
 			for (uint32_t i = 0; i < index_count; ++ i) {
 				const Vector3 &iii = vertex[index_buffer[i]];
-				for (uint32_t j = i + 1; j < index_count; ++ j) {
-					const Vector3 &jjj = vertex[index_buffer[j]];
-					if (iii.distance_squared_to(jjj) < 0.01) {
-						index_buffer[j] = index_buffer[i];
+				if (visited[i] == 0) {
+					for (uint32_t j = i + 1; j < index_count; ++ j) {
+						const Vector3 &jjj = vertex[index_buffer[j]];
+						if (iii.distance_squared_to(jjj) < 0.01) {
+							index_buffer[j] = index_buffer[i];
+							visited[j] = 1;
+						}
 					}
 				}
 			}
@@ -304,6 +315,8 @@ class WorldImporter {
 		// TODO: Other textures? Specular?
 		// I'm assuming this matches the order of textures used by XSI as documented here:
 		// https://sites.google.com/site/swbf2modtoolsdocumentation/misc_documentation
+		// I am not confident LibSWBF2 correctly sets the BumpMap flag, so attempt to load
+		// the second image of every material as normal map image.
 		EMaterialFlags material_flags = material.GetFlags();
 		//if ((uint32_t)material_flags & (uint32_t)EMaterialFlags::BumpMap) {
 			if (const LibSWBF2::Texture *texture = material.GetTexture(1)) {
@@ -504,6 +517,10 @@ class WorldImporter {
 			const String &bone_name = key_pair.key;
 			const LibSWBF2::List<Segment> &segments = key_pair.value;
 			MeshInstance3D *mesh = memnew(MeshInstance3D);
+			if (mesh == nullptr) {
+				UtilityFunctions::printerr("memnew failed to allocate a MeshInstance3D");
+				continue;
+			}
 			String mesh_name = String(model_name) + String("_") + bone_name + String("_") + "mesh";
 			mesh->set_name(mesh_name);
 			// TODO: LVLImport only applies override_texture to skinned meshes (bone_name == ""). Why?
@@ -520,7 +537,122 @@ class WorldImporter {
 			}
 		}
 
-		// XXX: ModelLoader.AddCollision
+		// Create collision bodies
+		// Note: we use the Ordnance collision bodies for everything
+		// TODO This still returns some weird primitives, such as the rock barricades on geo1
+		LibSWBF2::List<LibSWBF2::CollisionPrimitive> collision_primitives = model->GetCollisionPrimitives(ECollisionMaskFlags::Ordnance);
+		for (size_t i = 0; i < collision_primitives.Size(); ++ i) {
+			const LibSWBF2::CollisionPrimitive &collision_primitive = collision_primitives[i];
+			String parent_name = String::utf8(collision_primitive.GetParentName().Buffer());
+
+			StaticBody3D *static_body = memnew(StaticBody3D);
+			if (static_body == nullptr) {
+				UtilityFunctions::printerr("memnew failed to allocate a StaticBody3D");
+				continue;
+			}
+			static_body->set_name(parent_name + "_collision_primitive");
+
+			LibSWBF2::Vector3 pz = collision_primitive.GetPosition();
+			LibSWBF2::Vector4 rz = collision_primitive.GetRotation();
+			static_body->set_position(Vector3(pz.m_X, pz.m_Y, pz.m_Z));
+			static_body->set_quaternion(Quaternion(rz.m_X, rz.m_Y, rz.m_Z, rz.m_W));
+
+			Node *parent_node = root->find_child(parent_name, true, true);
+			if (parent_node) {
+				printdebug("Attaching collision primitive to ", parent_name);
+				make_parent_and_owner(parent_node, static_body);
+			} else {
+				make_parent_and_owner(root, static_body);
+				UtilityFunctions::printerr("Could not find parent node ", parent_name, "; attaching collision primitive to model root");
+			}
+
+			CollisionShape3D *collision_shape = memnew(CollisionShape3D);
+			if (collision_shape == nullptr) {
+				UtilityFunctions::printerr("memnew failed to allocate a CollisionShape3D");
+				continue;
+			}
+			collision_shape->set_name(parent_name + "_collision_shape");
+
+			ECollisionPrimitiveType pt = collision_primitive.GetPrimitiveType();
+			switch (pt) {
+				case ECollisionPrimitiveType::Cube: {
+					float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+					collision_primitive.GetCubeDims(sx, sy, sz);
+					Ref<BoxShape3D> shape;
+					shape.instantiate();
+					shape->set_size(Vector3(sx * 2, sy * 2, sz * 2));
+					collision_shape->set_shape(shape);
+					break;
+				}
+				case ECollisionPrimitiveType::Cylinder: {
+					float sr = 0.0f, sh = 0.0f;
+					collision_primitive.GetCylinderDims(sr, sh);
+					Ref<CylinderShape3D> shape;
+					shape.instantiate();
+					shape->set_radius(sr);
+					shape->set_height(sh);
+					collision_shape->set_shape(shape);
+					break;
+				}
+				case ECollisionPrimitiveType::Sphere: {
+					float sr = 0.0f;
+					collision_primitive.GetSphereRadius(sr);
+					Ref<SphereShape3D> shape;
+					shape.instantiate();
+					shape->set_radius(sr);
+					collision_shape->set_shape(shape);
+					break;
+				}
+				default:
+					UtilityFunctions::printerr("Skipping unsupported collision primitive type ", (int)pt);
+					break;
+			}
+			make_parent_and_owner(static_body, collision_shape);
+		}
+
+		// A model always has a collision mesh object, but it may be empty
+		do {
+			const LibSWBF2::CollisionMesh &collision_mesh = model->GetCollisionMesh();
+			uint32_t index_count = 0;
+			uint16_t *index_buffer = nullptr;
+			collision_mesh.GetIndexBuffer(ETopology::TriangleList, index_count, index_buffer);
+			if (index_count > 0) {
+				uint32_t vertex_count = 0;
+				LibSWBF2::Vector3 *vertex_buffer = nullptr;
+				collision_mesh.GetVertexBuffer(vertex_count, vertex_buffer);
+				StaticBody3D *static_body = memnew(StaticBody3D);
+				if (static_body == nullptr) {
+					UtilityFunctions::printerr("memnew failed to allocate a StaticBody3D");
+					break;
+				}
+				static_body->set_name("collision_mesh");
+				make_parent_and_owner(root, static_body);
+
+				CollisionShape3D *collision_shape = memnew(CollisionShape3D);
+				if (collision_shape == nullptr) {
+					UtilityFunctions::printerr("memnew failed to allocate a CollisionShape3D");
+					break;
+				}
+				collision_shape->set_name("collision_mesh_shape");
+				make_parent_and_owner(static_body, collision_shape);
+
+				Ref<ConcavePolygonShape3D> mesh_shape;
+				mesh_shape.instantiate();
+
+				PackedVector3Array mesh_faces;
+				mesh_faces.resize(index_count);
+
+				for (size_t i = 0; i < index_count; ++ i) {
+					const LibSWBF2::Vector3 &v = vertex_buffer[index_buffer[i]];
+					mesh_faces[i] = Vector3(v.m_X, v.m_Y, v.m_Z);
+				}
+
+				mesh_shape->set_faces(mesh_faces);
+				mesh_shape->set_backface_collision_enabled(true);
+
+				collision_shape->set_shape(mesh_shape);
+			}
+		} while (0);
 	}
 
 	Node3D *import_entity_class(const String &entity_class_name, const String &scene_dir) {
@@ -621,6 +753,8 @@ class WorldImporter {
 					break;
 				case 165377196: // OverrideTexture
 					// Silently ignore, only relevant in GeometryName
+					break;
+				case 2714356677: // FoleyFXGroups
 					break;
 				default:
 					UtilityFunctions::printerr("Skipping unknown property ", property_hash, " (hash) = ", property_value);
