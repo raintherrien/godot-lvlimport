@@ -289,7 +289,7 @@ class WorldImporter {
 		// Blend Maps
 		uint32_t blend_map_dim = 0;
 		uint32_t blend_map_layers = 0; // Do we care? Right now I ignore layers
-		TList<uint8_t> blend_map_buffer = Terrain_GetBlendMap(terrain, &blend_map_dim, &blend_map_layers);
+		TList<uint8_t> blend_map_buffer = Terrain_GetBlendMapT(terrain, &blend_map_dim, &blend_map_layers);
 
 		for (int i = 0; i < 4; ++ i) {
 			PackedByteArray packed_buffer;
@@ -314,9 +314,9 @@ class WorldImporter {
 
 		// Blend Layers
 		// TODO: Does SWBF2 have terrain bump mapping?
-		TList<LibSWBF2::Texture> layer_textures = Terrain_GetLayerTextures(terrain, container);
+		TList<const LibSWBF2::Texture> layer_textures = Terrain_GetLayerTexturesT(terrain, container);
 		for (size_t i = 0; i < layer_textures.size(); ++ i) {
-			LibSWBF2::Texture *texture = layer_textures.at(i);
+			const LibSWBF2::Texture *texture = layer_textures.at(i);
 			if (texture) {
 				Ref<ImageTexture> albedo_texture = import_texture(texture, scene_dir);
 				terrain_material->set_shader_parameter("BlendLayer" + itos(i), albedo_texture);
@@ -342,7 +342,7 @@ class WorldImporter {
 		uint16_t width = 0;
 		uint16_t height = 0;
 
-		TList<uint8_t> buffer = Texture_GetData(texture, &width, &height);
+		TList<uint8_t> buffer = Texture_GetDataT(texture, &width, &height);
 
 		if (width == 0 || height == 0) {
 			UtilityFunctions::printerr("Failed to load SWBF2 texture");
@@ -440,7 +440,7 @@ class WorldImporter {
 		return standard_material;
 	}
 
-	void segments_to_mesh(MeshInstance3D *mesh_instance, const List<const Segment *> segments, const String &override_texture, const String &scene_dir) {
+	void segments_to_mesh(MeshInstance3D *mesh_instance, const List<const Segment *> &segments, const String &override_texture, const String &scene_dir) {
 		Ref<ArrayMesh> array_mesh;
 		array_mesh.instantiate();
 
@@ -707,7 +707,7 @@ class WorldImporter {
 			const CollisionMesh *collision_mesh = Model_GetCollisionMesh(model);
 			TList<uint16_t> index_buffer = CollisionMesh_GetIndexBufferT(collision_mesh);
 			if (index_buffer.size() > 0) {
-				TList<LibSWBF2::Vector3> vertex_buffer = CollisionMesh_GetVertexBuffer(collision_mesh);
+				TList<LibSWBF2::Vector3> vertex_buffer = CollisionMesh_GetVertexBufferT(collision_mesh);
 				StaticBody3D *static_body = memnew(StaticBody3D);
 				if (static_body == nullptr) {
 					UtilityFunctions::printerr("memnew failed to allocate a StaticBody3D");
@@ -781,7 +781,7 @@ class WorldImporter {
 
 		// Perform the actual scene creation
 		printdebug("Creating entity class ", entity_class_name, " scene");
-		TList<uint32_t> property_hashes = EntityClass_GetAllPropertyHashes(entity_class);
+		TList<uint32_t> property_hashes = EntityClass_GetAllPropertyHashesT(entity_class);
 		String scene_path = scene_dir + String("/") + String(entity_class_name) + String(".tscn");
 		String next_attach_entity_class = "";
 		Node3D *root = memnew(Node3D);
@@ -948,7 +948,7 @@ public:
 			return;
 		}
 		lvl_root->set_name(lvl_filename.get_file());
-		TList<const World> worlds = Level_GetWorlds(level);
+		TList<const World> worlds = Level_GetWorldsT(level);
 		for (size_t i = 0; i < worlds.size(); ++ i) {
 			const World *world = worlds.at(i);
 			Node *world_node = import_world(world, scene_dir);
