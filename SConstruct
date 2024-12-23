@@ -17,6 +17,7 @@ env.Append(CPPPATH=["src/", "lib/LibSWBF2-redux/"])
 env.Append(LIBPATH=["lib/"])
 env.Append(LIBS=["libSWBF2"]) # https://git.prettyshitty.city/LibSWBF2-redux
 sources = Glob("src/*.cpp")
+warnings=['-Wall', '-Wextra', '-Wno-attributes', '-Wno-unused-variable', '-Wno-unused-parameter', '-Wno-sign-compare']
 
 if env["platform"] == "macos":
     library = env.SharedLibrary(
@@ -24,22 +25,26 @@ if env["platform"] == "macos":
             env["platform"], env["target"], env["platform"], env["target"]
         ),
         source=sources,
+        CCFLAGS=warnings
     )
 elif env["platform"] == "ios":
     if env["ios_simulator"]:
         library = env.StaticLibrary(
             "demo/bin/libgdlvlimport.{}.{}.simulator.a".format(env["platform"], env["target"]),
             source=sources,
+            CCFLAGS=warnings
         )
     else:
         library = env.StaticLibrary(
             "demo/bin/libgdlvlimport.{}.{}.a".format(env["platform"], env["target"]),
             source=sources,
+            CCFLAGS=warnings
         )
 else:
     library = env.SharedLibrary(
         "demo/bin/libgdlvlimport{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
         source=sources,
+        CCFLAGS=warnings
     )
 
 Default(library)
