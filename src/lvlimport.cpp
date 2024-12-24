@@ -226,15 +226,20 @@ class WorldImporter {
 
 		// Yeah... If we don't do this we can't calculate normals
 		// correctly. I know it's bad, you know it's bad, let's just move on.
-		printdebug("Brute forcing terrain indices... This will take a minute");
+		printdebug("Brute force optimizing terrain indices... This will take a minute");
 		PackedByteArray visited;
 		visited.resize(index_buffer.size());
 		visited.fill(0);
 
 		bool index_errors = false;
 
-		if (false) // XXX Disabled for debugging
+		int dbg_last_pct = -1;
 		for (uint32_t i = 0; i < index_buffer.size(); ++ i) {
+			int pct = std::floor(static_cast<float>(i) / index_buffer.size() * 100);
+			if (pct > dbg_last_pct) {
+				dbg_last_pct = pct;
+				printdebug(pct, "%");
+			}
 			size_t ii = *index_buffer.at(i);
 			if (ii >= vertex.size()) {
 				if (!index_errors) {
@@ -349,6 +354,23 @@ class WorldImporter {
 
 		array_mesh->surface_set_material(0, terrain_material);
 		terrain_mesh->set_mesh(array_mesh);
+
+		String scene_path = scene_dir + String("/") + String(terrain_name) + String("_terrain.tscn");
+
+		Error save_err = save_as_scene(terrain_mesh, scene_path);
+		if (save_err == Error::OK) {
+			Ref<PackedScene> scene = ResourceLoader::get_singleton()->load(scene_path);
+			if (scene->can_instantiate()) {
+				memdelete(terrain_mesh);
+				terrain_mesh = Node::cast_to<MeshInstance3D>(scene->instantiate());
+				if (terrain_mesh == nullptr) {
+					UtilityFunctions::printerr("Terrain scene instantiation failed");
+					return nullptr;
+				}
+			} else {
+				UtilityFunctions::printerr("Terrain scene cannot be instantiated");
+			}
+		}
 
 		return terrain_mesh;
 	}
@@ -964,8 +986,7 @@ class WorldImporter {
 	}
 
 	template <typename... Args> static void printdebug(const Variant &p_arg1, Args&&... p_args) {
-		if (false)
-			UtilityFunctions::print(p_arg1, std::forward<Args>(p_args)...);
+		UtilityFunctions::print(p_arg1, std::forward<Args>(p_args)...);
 	}
 
 public:
