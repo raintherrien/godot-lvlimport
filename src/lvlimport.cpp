@@ -20,6 +20,8 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 #include <LibSWBF2/API.h>
+#include <atomic>
+#include <utility>
 #include <float.h>
 
 using namespace LibSWBF2;
@@ -31,6 +33,15 @@ class WorldImporter {
 	HashMap<String, String> entity_class_scenes;
 	HashMap<String, Ref<ImageTexture>> textures;
 	HashMap<String, Ref<StandardMaterial3D>> materials; // key = albedo texture name
+
+	String make_name_valid(const String &name)
+	{
+		static std::atomic_uint id = 0;
+		if (name.is_empty()) {
+			return String::utf8((std::string{"no_name_"} + std::to_string(id.fetch_add(1))).c_str());
+		}
+		return name;
+	}
 
 	template<typename Fn, typename ...Args>
 	static String api_str_to_godot(Fn &&fn, Args && ...args)
@@ -50,7 +61,7 @@ class WorldImporter {
 			UtilityFunctions::printerr("memnew failed to allocate a Node");
 			return nullptr;
 		}
-		world_root->set_name(world_name);
+		world_root->set_name(make_name_valid(world_name));
 
 		// Import instances
 		TList<const Instance> instances = World_GetInstancesT(world);
@@ -58,18 +69,18 @@ class WorldImporter {
 			const Instance *instance = instances.at(i);
 			String instance_name = api_str_to_godot(Instance_GetName, instance);
 			String entity_class_name = api_str_to_godot(Instance_GetEntityClassName, instance);
-			printdebug("Importing instance ", i, "/", instances.size(), " ", instance_name);
+			printdebug("Importing instance ", i, "/", instances.size(), " '", instance_name, "'");
 			Node3D *instance_node = import_entity_class(entity_class_name, scene_dir);
 			if (instance_node) {
-				printdebug("Attaching ", instance_name, " to world");
-				instance_node->set_name(instance_name);
+				printdebug("Attaching instance '", instance_name, "' to world");
+				instance_node->set_name(make_name_valid(instance_name));
 				LibSWBF2::Vector3 pz = Instance_GetPosition(instance);
 				LibSWBF2::Vector4 rz = Instance_GetRotation(instance);
 				instance_node->set_position(Vector3(pz.m_X, pz.m_Y, pz.m_Z));
 				instance_node->set_quaternion(Quaternion(rz.m_X, rz.m_Y, rz.m_Z, rz.m_W));
 				make_parent_and_owner(world_root, instance_node);
 			} else {
-				UtilityFunctions::printerr("Failed to import ", instance_name);
+				UtilityFunctions::printerr("Failed to import instance '", instance_name, "'");
 			}
 		}
 
@@ -121,7 +132,7 @@ class WorldImporter {
 			UtilityFunctions::printerr("Failed to create skydome node");
 			return nullptr;
 		}
-		skydome->set_name("skydome");
+		skydome->set_name(make_name_valid("skydome"));
 		skydome->set_scale(Vector3(300, 300, 300));
 
 		// TODO: This LibSWBF2 code may throw an exception! But Godot does not compile with exceptions!
@@ -166,7 +177,7 @@ class WorldImporter {
 			UtilityFunctions::printerr("Failed to create terrain mesh");
 			return nullptr;
 		}
-		terrain_mesh->set_name(terrain_name);
+		terrain_mesh->set_name(make_name_valid(terrain_name));
 
 		Ref<ArrayMesh> array_mesh;
 		array_mesh.instantiate();
@@ -220,11 +231,16 @@ class WorldImporter {
 		visited.resize(index_buffer.size());
 		visited.fill(0);
 
+		bool index_errors = false;
+
 		if (false) // XXX Disabled for debugging
 		for (uint32_t i = 0; i < index_buffer.size(); ++ i) {
 			size_t ii = *index_buffer.at(i);
 			if (ii >= vertex.size()) {
-				UtilityFunctions::printerr("Index ", ii, " is beyond the size of this vertex array (", vertex.size(), ")");
+				if (!index_errors) {
+					UtilityFunctions::printerr("Terrain index ", ii, " is beyond the size of this vertex array (", vertex.size(), ") and skipping further index errors");
+				}
+				index_errors = true;
 				continue;
 			}
 			const Vector3 &iii = vertex[ii];
@@ -232,7 +248,10 @@ class WorldImporter {
 				for (uint32_t j = i + 1; j < index_buffer.size(); ++ j) {
 					size_t ij = *index_buffer.at(j);
 					if (ij >= vertex.size()) {
-						UtilityFunctions::printerr("Index ", ij, " is beyond the size of this vertex array (", vertex.size(), ")");
+						if (!index_errors) {
+							UtilityFunctions::printerr("Terrain index ", ij, " is beyond the size of this vertex array (", vertex.size(), ") and skipping further index errors");
+						}
+						index_errors = true;
 						continue;
 					}
 					const Vector3 &jjj = vertex[ij];
@@ -253,7 +272,10 @@ class WorldImporter {
 			int max_v = std::max(v0, std::max(v1, v2));
 
 			if (max_v >= vertex.size()) {
-				UtilityFunctions::printerr("Index ", max_v, " is beyond the size of this vertex array (", vertex.size(), ")");
+				if (!index_errors) {
+					UtilityFunctions::printerr("Terrain index ", max_v, " is beyond the size of this vertex array (", vertex.size(), ") and skipping further index errors");
+				}
+				index_errors = true;
 				continue;
 			}
 
@@ -494,16 +516,52 @@ class WorldImporter {
 					index.push_back(*index_buffer.at(i));
 				}
 			} else if (topology == ETopology::TriangleStrip) {
-				// Convert strip to list
-				for (uint32_t i = 0; i < index_buffer.size() - 2; ++ i) {
-					if (i % 2 == 1) {
-						index.push_back(*index_buffer.at(i+0));
-						index.push_back(*index_buffer.at(i+1));
-						index.push_back(*index_buffer.at(i+2));
-					} else {
-						index.push_back(*index_buffer.at(i+0));
-						index.push_back(*index_buffer.at(i+2));
-						index.push_back(*index_buffer.at(i+1));
+				// Convert strip to list. From Chunks/MSH/STRP.cpp: Two consecutive indices
+				// with the highest bit set indicate the start of a triangle strip.
+				bool clockwise = false;
+				bool insert_degen_tri = false;
+				std::vector<uint16_t> indices;
+
+				for (uint32_t i = 0; i < index_buffer.size(); ++ i) {
+					uint16_t v = *index_buffer.at(i);
+					// If two consecutive indices have their highest bit set we are
+					// starting a new triangle strip.
+					if (i + 1 < index_buffer.size() && (v & *index_buffer.at(i+1)) & 0x8000) {
+						clockwise = false;
+						indices.clear();
+
+						// In order to transition between triangle strips we need two degenerate
+						// triangles which form an invisible line segment between them.
+						if (index.size() >= 3) {
+							insert_degen_tri = true;
+							// Copy the last triangle
+							index.push_back(index[index.size() - 3]);
+							index.push_back(index[index.size() - 3]);
+							index.push_back(index[index.size() - 3]);
+						} else if (index.size() > 0) {
+							UtilityFunctions::printerr("Triangle strip is malformed. Cannot end triangle strip with less than 3 indices.");
+						}
+					}
+
+					indices.push_back(v & 0x7FFF);
+
+					if (indices.size() >= 3) {
+						uint16_t v0 = indices[indices.size() - 3];
+						uint16_t v1 = indices[indices.size() - 2];
+						uint16_t v2 = indices[indices.size() - 1];
+						// See above for why we may execute this twice to create a degen tri.
+						do {
+							if (clockwise) {
+								index.push_back(v0);
+								index.push_back(v1);
+								index.push_back(v2);
+							} else {
+								index.push_back(v0);
+								index.push_back(v2);
+								index.push_back(v1);
+							}
+						} while (std::exchange(insert_degen_tri, false));
+						clockwise = !clockwise;
 					}
 				}
 			} else if (topology == ETopology::TriangleFan) {
@@ -562,7 +620,7 @@ class WorldImporter {
 					UtilityFunctions::printerr("Failed to create bone node");
 					continue;
 				}
-				bone_node->set_name(bone_name);
+				bone_node->set_name(make_name_valid(bone_name));
 				named_bones.insert(bone_name, bone_node);
 				make_parent_and_owner(root, bone_node);
 			}
@@ -616,7 +674,7 @@ class WorldImporter {
 				continue;
 			}
 			String mesh_name = String(model_name) + String("_") + bone_name + String("_") + "mesh";
-			mesh->set_name(mesh_name);
+			mesh->set_name(make_name_valid(mesh_name));
 			// TODO: LVLImport only applies override_texture to skinned meshes (bone_name == ""). Why?
 			segments_to_mesh(mesh, segments, override_texture, scene_dir);
 
@@ -642,7 +700,7 @@ class WorldImporter {
 				UtilityFunctions::printerr("memnew failed to allocate a StaticBody3D");
 				continue;
 			}
-			static_body->set_name(parent_name + "_collision_primitive");
+			static_body->set_name(make_name_valid(parent_name + "_collision_primitive"));
 
 			LibSWBF2::Vector3 pz = CollisionPrimitive_GetPosition(collision_primitive);
 			LibSWBF2::Vector4 rz = CollisionPrimitive_GetRotation(collision_primitive);
@@ -663,7 +721,7 @@ class WorldImporter {
 				UtilityFunctions::printerr("memnew failed to allocate a CollisionShape3D");
 				continue;
 			}
-			collision_shape->set_name(parent_name + "_collision_shape");
+			collision_shape->set_name(make_name_valid(parent_name + "_collision_shape"));
 
 			ECollisionPrimitiveType pt = CollisionPrimitive_GetType(collision_primitive);
 			switch (pt) {
@@ -713,7 +771,7 @@ class WorldImporter {
 					UtilityFunctions::printerr("memnew failed to allocate a StaticBody3D");
 					break;
 				}
-				static_body->set_name("collision_mesh");
+				static_body->set_name(make_name_valid("collision_mesh"));
 				make_parent_and_owner(root, static_body);
 
 				CollisionShape3D *collision_shape = memnew(CollisionShape3D);
@@ -721,7 +779,7 @@ class WorldImporter {
 					UtilityFunctions::printerr("memnew failed to allocate a CollisionShape3D");
 					break;
 				}
-				collision_shape->set_name("collision_mesh_shape");
+				collision_shape->set_name(make_name_valid("collision_mesh_shape"));
 				make_parent_and_owner(static_body, collision_shape);
 
 				Ref<ConcavePolygonShape3D> mesh_shape;
@@ -789,7 +847,7 @@ class WorldImporter {
 			UtilityFunctions::printerr("memnew failed to allocate a Node3D");
 			return nullptr;
 		}
-		root->set_name(entity_class_name); // Attachments seem to have no name, so we need a default
+		root->set_name(make_name_valid(entity_class_name)); // Attachments seem to have no name, so we need a default
 		for (size_t pi = 0; pi < property_hashes.size(); ++ pi) {
 			uint32_t property_hash = *property_hashes.at(pi);
 			String property_value = api_str_to_godot(EntityClass_GetPropertyValue, entity_class, property_hash);
@@ -947,7 +1005,7 @@ public:
 			UtilityFunctions::printerr("memnew failed to allocate a Node");
 			return;
 		}
-		lvl_root->set_name(lvl_filename.get_file());
+		lvl_root->set_name(make_name_valid(lvl_filename.get_file()));
 		TList<const World> worlds = Level_GetWorldsT(level);
 		for (size_t i = 0; i < worlds.size(); ++ i) {
 			const World *world = worlds.at(i);
