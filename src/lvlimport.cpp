@@ -373,6 +373,7 @@ class WorldImporter {
 
 		String texture_name = api_str_to_godot(Texture_GetName, texture);
 
+		String png_path = scene_dir + String("/") + String(texture_name) + String("_tex.png");
 		String resource_path = scene_dir + String("/") + String(texture_name) + String("_tex.tres");
 
 		Ref<ImageTexture> texture2d = maybe_load_texture(texture_name);
@@ -385,6 +386,7 @@ class WorldImporter {
 			memcpy(packed_buffer.ptrw(), buffer.data(), size);
 
 			Ref<Image> image = Image::create_from_data(width, height, false, Image::Format::FORMAT_RGBA8, packed_buffer);
+			image->save_png(png_path);
 			texture2d = ImageTexture::create_from_image(image);
 			if (Error save_err = ResourceSaver::get_singleton()->save(texture2d, resource_path)) {
 				UtilityFunctions::printerr("Error saving texture ", save_err);
